@@ -21,15 +21,15 @@ import io.undertow.security.api.SecurityContext;
 import io.undertow.server.HttpServerExchange;
 import io.undertow.server.handlers.CookieImpl;
 import io.undertow.server.session.Session;
-import io.undertow.server.session.SessionManager;
 import io.undertow.util.HttpString;
-import io.undertow.util.Sessions;
+import org.wildfly.common.Assert;
 import org.wildfly.security.auth.server.SecurityIdentity;
 import org.wildfly.security.http.Cookie;
 import org.wildfly.security.http.HttpAuthenticationException;
 import org.wildfly.security.http.HttpExchangeSpi;
 import org.wildfly.security.http.HttpServerSession;
 
+import java.io.InputStream;
 import java.io.OutputStream;
 import java.net.InetSocketAddress;
 import java.util.HashMap;
@@ -45,11 +45,11 @@ import static org.wildfly.common.Assert.checkNotNullParam;
  *
  * @author <a href="mailto:darran.lofthouse@jboss.com">Darran Lofthouse</a>
  */
-class ElytronHttpExchange implements HttpExchangeSpi {
+public abstract class ElytronHttpExchange implements HttpExchangeSpi {
 
     private final HttpServerExchange httpServerExchange;
 
-    ElytronHttpExchange(final HttpServerExchange httpServerExchange) {
+    public ElytronHttpExchange(final HttpServerExchange httpServerExchange) {
         this.httpServerExchange = checkNotNullParam("httpServerExchange", httpServerExchange);
     }
 
@@ -183,6 +183,11 @@ class ElytronHttpExchange implements HttpExchangeSpi {
     }
 
     @Override
+    public InputStream getInputStream() {
+        return httpServerExchange.getInputStream();
+    }
+
+    @Override
     public InetSocketAddress getSourceAddress() {
         return httpServerExchange.getSourceAddress();
     }
@@ -205,24 +210,8 @@ class ElytronHttpExchange implements HttpExchangeSpi {
         return null;
     }
 
-    @Override
-    public HttpServerSession getSession(boolean create) {
-        Session session;
-
-        if (create) {
-            session = Sessions.getOrCreateSession(httpServerExchange);
-        } else {
-            session = Sessions.getSession(httpServerExchange);
-        }
-
-        if (session == null) {
-            return null;
-        }
-
-        return createSession(session);
-    }
-
-    private HttpServerSession createSession(final Session session) {
+    protected HttpServerSession createSession(final Session session) {
+        Assert.checkNotNullParam("session", session);
         return new HttpServerSession() {
             @Override
             public String getId() {
@@ -250,17 +239,4 @@ class ElytronHttpExchange implements HttpExchangeSpi {
             }
         };
     }
-
-    @Override
-    public HttpServerSession getSession(String id) {
-        SessionManager sessionManager = httpServerExchange.getAttachment(SessionManager.ATTACHMENT_KEY);
-        Session session = sessionManager.getSession(id);
-
-        if (session == null) {
-            return null;
-        }
-
-        return createSession(session);
-    }
-
 }

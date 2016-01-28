@@ -17,16 +17,22 @@
  */
 package org.wildfly.elytron.web.undertow.server;
 
-import static org.wildfly.common.Assert.checkNotNullParam;
 import io.undertow.security.api.SecurityContext;
 import io.undertow.security.handlers.AbstractSecurityContextAssociationHandler;
 import io.undertow.server.HttpHandler;
 import io.undertow.server.HttpServerExchange;
+import io.undertow.server.session.Session;
+import io.undertow.server.session.SessionManager;
+import io.undertow.util.Sessions;
+import org.wildfly.security.http.HttpExchangeSpi;
+import org.wildfly.security.http.HttpServerAuthenticationMechanism;
+import org.wildfly.security.http.HttpServerSession;
 
 import java.util.List;
+import java.util.Set;
 import java.util.function.Supplier;
 
-import org.wildfly.security.http.HttpServerAuthenticationMechanism;
+import static org.wildfly.common.Assert.checkNotNullParam;
 
 /**
  *
@@ -51,7 +57,49 @@ public class ElytronContextAssociationHandler extends AbstractSecurityContextAss
      */
     @Override
     public SecurityContext createSecurityContext(HttpServerExchange exchange) {
-        return new SecurityContextImpl(exchange, mechanismSupplier);
+        return new SecurityContextImpl(exchange, mechanismSupplier, getHttpExchangeSupplier(exchange));
     }
 
+    protected Supplier<HttpExchangeSpi> getHttpExchangeSupplier(HttpServerExchange exchange) {
+        return () -> createHttpExchange(exchange);
+    }
+
+    protected ElytronHttpExchange createHttpExchange(HttpServerExchange exchange) {
+        return new ElytronHttpExchange(exchange) {
+            @Override
+            public HttpServerSession getSession(boolean create) {
+                Session session;
+
+                if (create) {
+                    session = Sessions.getOrCreateSession(exchange);
+                } else {
+                    session = Sessions.getSession(exchange);
+                }
+
+                if (session == null) {
+                    return null;
+                }
+
+                return createSession(session);
+            }
+
+            @Override
+            public HttpServerSession getSession(String id) {
+                SessionManager sessionManager = exchange.getAttachment(SessionManager.ATTACHMENT_KEY);
+                Session session = sessionManager.getSession(id);
+
+                if (session == null) {
+                    return null;
+                }
+
+                return createSession(session);
+            }
+
+            @Override
+            public Set<String> getSessions() {
+                SessionManager sessionManager = exchange.getAttachment(SessionManager.ATTACHMENT_KEY);
+                return sessionManager.getAllSessions();
+            }
+        };
+    }
 }
