@@ -3,6 +3,8 @@ package org.wildfly.elytron.web.jetty.server;
 import org.eclipse.jetty.security.Authenticator;
 import org.eclipse.jetty.security.ServerAuthException;
 import org.eclipse.jetty.server.Authentication;
+import org.eclipse.jetty.server.Request;
+import org.eclipse.jetty.server.Response;
 import org.wildfly.security.http.HttpAuthenticationException;
 import org.wildfly.security.http.HttpAuthenticator;
 import org.wildfly.security.http.HttpServerAuthenticationMechanism;
@@ -37,30 +39,30 @@ public class ElytronAuthenticatorWrapper implements Authenticator {
 
     @Override
     public void prepareRequest(ServletRequest request) {
-
+        // no-op
     }
 
     @Override
-    public Authentication validateRequest(ServletRequest request, ServletResponse response, boolean mandatory) throws ServerAuthException {
+    public Authentication validateRequest(ServletRequest servletRequest, ServletResponse servletResponse, boolean mandatory) throws ServerAuthException {
+        Request request = (Request) servletRequest;
+        Response response = (Response) servletResponse;
         HttpAuthenticator authenticator = HttpAuthenticator.builder()
                 .setMechanismSupplier(mechanismSupplier)
-                .setHttpExchangeSpi(new ElytronHttpExchange(request, response))
+                .setHttpExchangeSupplier(() -> new ElytronHttpExchange(request, response))
                 .setRequired(mandatory)
                 .setIgnoreOptionalFailures(false) // TODO - Cover this one later.
                 .build();
 
         try {
-            if (authenticator.authenticate()) {
-                return Authentication.SEND_SUCCESS;
-            }
+            authenticator.authenticate();
         } catch (HttpAuthenticationException e) {
         }
 
-        return Authentication.SEND_FAILURE;
+        return request.getAuthentication();
     }
 
     @Override
     public boolean secureResponse(ServletRequest request, ServletResponse response, boolean mandatory, Authentication.User validatedUser) throws ServerAuthException {
-        return false;
+        return true;
     }
 }
