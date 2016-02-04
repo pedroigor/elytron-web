@@ -17,28 +17,39 @@
  */
 package org.wildfly.elytron.web.undertow.server;
 
-import static org.wildfly.common.Assert.checkNotNullParam;
-
-import java.util.List;
-
 import io.undertow.security.api.SecurityContext;
 import io.undertow.server.HttpServerExchange;
+import io.undertow.server.handlers.CookieImpl;
+import io.undertow.server.session.Session;
 import io.undertow.util.HttpString;
-
+import org.wildfly.common.Assert;
 import org.wildfly.security.auth.server.SecurityIdentity;
+import org.wildfly.security.http.Cookie;
 import org.wildfly.security.http.HttpAuthenticationException;
 import org.wildfly.security.http.HttpExchangeSpi;
+import org.wildfly.security.http.HttpServerSession;
+
+import java.io.InputStream;
+import java.io.OutputStream;
+import java.net.InetSocketAddress;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.function.Function;
+import java.util.stream.Collectors;
+
+import static org.wildfly.common.Assert.checkNotNullParam;
 
 /**
  * Implementation of {@link HttpExchangeSpi} to wrap access to the Undertow specific {@link HttpServerExchange}.
  *
  * @author <a href="mailto:darran.lofthouse@jboss.com">Darran Lofthouse</a>
  */
-class ElytronHttpExchange implements HttpExchangeSpi {
+public abstract class ElytronHttpExchange implements HttpExchangeSpi {
 
     private final HttpServerExchange httpServerExchange;
 
-    ElytronHttpExchange(final HttpServerExchange httpServerExchange) {
+    public ElytronHttpExchange(final HttpServerExchange httpServerExchange) {
         this.httpServerExchange = checkNotNullParam("httpServerExchange", httpServerExchange);
     }
 
@@ -92,4 +103,140 @@ class ElytronHttpExchange implements HttpExchangeSpi {
     public void badRequest(HttpAuthenticationException error, String mechanismName) {
     }
 
+    @Override
+    public String getRequestMethod() {
+        return httpServerExchange.getRequestMethod().toString();
+    }
+
+    @Override
+    public String getRequestURI() {
+        StringBuilder uriBuilder = new StringBuilder();
+
+        if (!httpServerExchange.isHostIncludedInRequestURI()) {
+            uriBuilder.append(httpServerExchange.getRequestScheme()).append("://").append(httpServerExchange.getHostAndPort());
+        }
+
+        uriBuilder.append(httpServerExchange.getRequestURI());
+
+        String queryString = httpServerExchange.getQueryString();
+
+        if (queryString != null && !"".equals(queryString.trim())) {
+            uriBuilder.append("?").append(queryString);
+        }
+
+        return uriBuilder.toString();
+    }
+
+    @Override
+    public Map<String, String[]> getQueryParameters() {
+        HashMap<String, String[]> parameters = new HashMap<>();
+
+        httpServerExchange.getQueryParameters().forEach((name, values) -> parameters.put(name, values.toArray(new String[values.size()])));
+
+        return parameters;
+    }
+
+    @Override
+    public Cookie[] getCookies() {
+        Map<String, io.undertow.server.handlers.Cookie> cookies = httpServerExchange.getRequestCookies();
+        return cookies.values().stream().map((Function<io.undertow.server.handlers.Cookie, Cookie>) cookie -> new Cookie() {
+            @Override
+            public String getName() {
+                return cookie.getName();
+            }
+
+            @Override
+            public String getValue() {
+                return cookie.getValue();
+            }
+
+            @Override
+            public String getDomain() {
+                return cookie.getDomain();
+            }
+
+            @Override
+            public int getMaxAge() {
+                return cookie.getMaxAge();
+            }
+
+            @Override
+            public String getPath() {
+                return cookie.getPath();
+            }
+
+            @Override
+            public boolean isSecure() {
+                return cookie.isSecure();
+            }
+
+            @Override
+            public int getVersion() {
+                return cookie.getVersion();
+            }
+
+            @Override
+            public boolean isHttpOnly() {
+                return cookie.isHttpOnly();
+            }
+        }).collect(Collectors.toList()).toArray(new Cookie[cookies.size()]);
+    }
+
+    @Override
+    public InputStream getInputStream() {
+        return httpServerExchange.getInputStream();
+    }
+
+    @Override
+    public InetSocketAddress getSourceAddress() {
+        return httpServerExchange.getSourceAddress();
+    }
+
+    @Override
+    public void setResponseCookie(Cookie cookie) {
+        CookieImpl actualCookie = new CookieImpl(cookie.getName(), cookie.getValue());
+
+        actualCookie.setDomain(cookie.getDomain());
+        actualCookie.setMaxAge(cookie.getMaxAge());
+        actualCookie.setHttpOnly(cookie.isHttpOnly());
+        actualCookie.setSecure(cookie.isSecure());
+        actualCookie.setPath(cookie.getPath());
+
+        httpServerExchange.setResponseCookie(actualCookie);
+    }
+
+    @Override
+    public OutputStream getOutputStream() {
+        return null;
+    }
+
+    protected HttpServerSession createSession(final Session session) {
+        Assert.checkNotNullParam("session", session);
+        return new HttpServerSession() {
+            @Override
+            public String getId() {
+                return session.getId();
+            }
+
+            @Override
+            public Object getAttribute(String name) {
+                return session.getAttribute(name);
+            }
+
+            @Override
+            public void setAttribute(String name, Object value) {
+                session.setAttribute(name, value);
+            }
+
+            @Override
+            public Object removeAttribute(String name) {
+                return session.removeAttribute(name);
+            }
+
+            @Override
+            public void invalidate() {
+                session.invalidate(httpServerExchange);
+            }
+        };
+    }
 }
