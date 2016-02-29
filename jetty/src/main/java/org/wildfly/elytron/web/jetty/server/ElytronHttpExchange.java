@@ -248,4 +248,8 @@ public class ElytronHttpExchange implements HttpExchangeSpi {
     public Set<String> getSessions() {
         return Collections.emptySet();
     }
+
+    @Override
+    public void end() {
+    }
 }

@@ -68,6 +68,12 @@ public class ElytronContextAssociationHandler extends AbstractSecurityContextAss
         return new ElytronHttpExchange(exchange) {
             @Override
             public HttpServerSession getSession(boolean create) {
+                SessionManager sessionManager = exchange.getAttachment(SessionManager.ATTACHMENT_KEY);
+
+                if (sessionManager == null) {
+                    return null;
+                }
+
                 Session session;
 
                 if (create) {
@@ -99,6 +105,11 @@ public class ElytronContextAssociationHandler extends AbstractSecurityContextAss
             public Set<String> getSessions() {
                 SessionManager sessionManager = exchange.getAttachment(SessionManager.ATTACHMENT_KEY);
                 return sessionManager.getAllSessions();
+            }
+
+            @Override
+            public void end() {
+                exchange.endExchange();
             }
         };
     }
