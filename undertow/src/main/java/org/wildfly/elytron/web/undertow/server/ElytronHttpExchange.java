@@ -304,13 +304,15 @@ public class ElytronHttpExchange implements HttpExchangeSpi {
                 return null;
             case SESSION:
                 SessionManager sessionManager = getSessionManager();
-                SessionConfig sessionConfig = getSessionConfig();
-                Session session = sessionManager.getSession(httpServerExchange, sessionConfig);
-                if (session == null) {
-                    session = sessionManager.createSession(httpServerExchange, sessionConfig);
-                }
+                if (sessionManager != null) {
+                    SessionConfig sessionConfig = getSessionConfig();
+                    Session session = sessionManager.getSession(httpServerExchange, sessionConfig);
+                    if (session == null) {
+                        session = sessionManager.createSession(httpServerExchange, sessionConfig);
+                    }
 
-                return toScope(session);
+                    return toScope(session);
+                }
             case SSL_SESSION:
                 return getScope(getSSLSession());
         }

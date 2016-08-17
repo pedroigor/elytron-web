@@ -31,6 +31,8 @@ import java.nio.charset.Charset;
 import java.security.KeyStore;
 import java.security.KeyStoreException;
 import java.util.List;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
 import java.util.stream.Collectors;
 
 import javax.net.ssl.KeyManager;
@@ -54,11 +56,17 @@ import org.junit.runner.RunWith;
 import org.wildfly.security.auth.permission.LoginPermission;
 import org.wildfly.security.auth.realm.KeyStoreBackedSecurityRealm;
 import org.wildfly.security.auth.server.HttpAuthenticationFactory;
+import org.wildfly.security.auth.server.IdentityLocator;
 import org.wildfly.security.auth.server.MechanismConfiguration;
 import org.wildfly.security.auth.server.MechanismConfigurationSelector;
 import org.wildfly.security.auth.server.PrincipalDecoder;
+import org.wildfly.security.auth.server.RealmIdentity;
+import org.wildfly.security.auth.server.RealmUnavailableException;
 import org.wildfly.security.auth.server.SecurityDomain;
 import org.wildfly.security.auth.server.SecurityRealm;
+import org.wildfly.security.auth.server.SupportLevel;
+import org.wildfly.security.credential.Credential;
+import org.wildfly.security.evidence.Evidence;
 import org.wildfly.security.http.HttpAuthenticationException;
 import org.wildfly.security.http.HttpServerAuthenticationMechanism;
 import org.wildfly.security.http.HttpServerAuthenticationMechanismFactory;
@@ -88,33 +96,6 @@ import io.undertow.util.StatusCodes;
 public class ClientCertAuthenticationTest {
 
     private static SSLContext clientContext;
-
-    private static SecurityDomain securityDomain;
-
-    private static HttpAuthenticationFactory httpAuthenticationFactory;
-
-    @BeforeClass
-    public static void setupHttpAuthenticationFactory() throws Exception {
-        SecurityRealm securityRealm = new KeyStoreBackedSecurityRealm(loadKeyStore("/tls/beetles.keystore"));
-
-        securityDomain = SecurityDomain.builder()
-                .addRealm("KeystoreRealm", securityRealm)
-                    .build()
-                .setDefaultRealmName("KeystoreRealm")
-                .setPrincipalDecoder(PrincipalDecoder.aggregate(new X500AttributePrincipalDecoder("2.5.4.3", 1), PrincipalDecoder.DEFAULT))
-                .setPreRealmRewriter(s -> s.toLowerCase())
-                .setPermissionMapper((principal, roles) -> PermissionVerifier.from(new LoginPermission()))
-                .build();
-
-        HttpServerAuthenticationMechanismFactory factory = new ServerMechanismFactoryImpl();
-        httpAuthenticationFactory = HttpAuthenticationFactory.builder()
-            .setSecurityDomain(securityDomain)
-            .setMechanismConfigurationSelector(MechanismConfigurationSelector.constantSelector(
-                    MechanismConfiguration.builder()
-                    .build()))
-            .setFactory(factory)
-            .build();
-    }
 
     @BeforeClass
     public static void setupClient() throws Exception {
@@ -174,18 +155,42 @@ public class ClientCertAuthenticationTest {
 
     // Test Mechanism Is Available
     @Test
-    public void testClientCertAuthenticationAvailable() {
-        assertTrue("CLIENT_CERT Authentication Supported", httpAuthenticationFactory.getMechanismNames().contains("CLIENT_CERT"));
+    public void testClientCertAuthenticationAvailable() throws Exception {
+        assertTrue("CLIENT_CERT Authentication Supported", createHttpAuthenticationFactory().getMechanismNames().contains("CLIENT_CERT"));
     }
 
     // Test authentication attached to SSLSession.
     @Test
     public void testClientCertFromSession() throws Exception {
+        CountDownLatch realmIdentityInvocationCount = new CountDownLatch(2);
+        KeyStoreBackedSecurityRealm delegate = createDefaultSecurityRealm();
+        SecurityRealm securityRealm = new SecurityRealm() {
+            @Override
+            public RealmIdentity getRealmIdentity(IdentityLocator locator) throws RealmUnavailableException {
+                if (realmIdentityInvocationCount.getCount() == 0) {
+                    throw new IllegalStateException("Unexpected number of calls.");
+                }
+                realmIdentityInvocationCount.countDown();
+                return delegate.getRealmIdentity(locator);
+            }
+
+            @Override
+            public SupportLevel getCredentialAcquireSupport(Class<? extends Credential> credentialType, String algorithmName) throws RealmUnavailableException {
+                return delegate.getCredentialAcquireSupport(credentialType, algorithmName);
+            }
+
+            @Override
+            public SupportLevel getEvidenceVerifySupport(Class<? extends Evidence> evidenceType, String algorithmName) throws RealmUnavailableException {
+                return delegate.getEvidenceVerifySupport(evidenceType, algorithmName);
+            }
+        };
+        HttpAuthenticationFactory httpAuthenticationFactory = createHttpAuthenticationFactory(securityRealm);
         performClientCertTest(new SSLContextBuilder()
-                .setSecurityDomain(securityDomain)
+                .setSecurityDomain(httpAuthenticationFactory.getSecurityDomain())
                 .setKeyManager(getKeyManager("/tls/scarab.keystore"))
                 .setTrustManager(getCATrustManager())
-                .build().create());
+                .build().create(), httpAuthenticationFactory);
+        realmIdentityInvocationCount.await(1, TimeUnit.SECONDS);
     }
 
     // Test authentication delayed until mechanism.
@@ -196,14 +201,14 @@ public class ClientCertAuthenticationTest {
                 .setKeyManager(getKeyManager("/tls/scarab.keystore"))
                 .setTrustManager(getCATrustManager())
                 .setWantClientAuth(true)
-                .build().create());
+                .build().create(), createHttpAuthenticationFactory());
     }
 
     /*
      * Regardless of how the SSLContext is defined the end result should be the same, authentication during SSLSession
      * establishment is just an optimisation.
      */
-    private void performClientCertTest(final SSLContext serverContext) throws Exception {
+    private void performClientCertTest(final SSLContext serverContext, HttpAuthenticationFactory authenticationFactory) throws Exception {
         UndertowXnioSsl ssl = new UndertowXnioSsl(getXnioWorker().getXnio(), OptionMap.EMPTY, serverContext);
         OptionMap serverOptions = OptionMap.builder()
                 .set(Options.TCP_NODELAY, true)
@@ -216,14 +221,15 @@ public class ClientCertAuthenticationTest {
         /*
          * Full Chain Set Up
          */
-        HttpHandler nextHandler = new ResponseHandler(httpAuthenticationFactory.getSecurityDomain());
+        SecurityDomain securityDomain = authenticationFactory.getSecurityDomain();
+        HttpHandler nextHandler = new ResponseHandler(securityDomain);
         nextHandler = new ElytronRunAsHandler(nextHandler);
         nextHandler = new BlockingHandler(nextHandler);
         nextHandler = new AuthenticationCallHandler(nextHandler);
         nextHandler = new AuthenticationConstraintHandler(nextHandler);
         nextHandler = ElytronContextAssociationHandler.builder()
                         .setNext(nextHandler)
-                        .setMechanismSupplier(ClientCertAuthenticationTest::getAuthenticationMechanisms)
+                        .setMechanismSupplier(() -> getAuthenticationMechanisms(authenticationFactory))
                         .build();
 
         DefaultServer.setTestHandler(nextHandler);
@@ -237,30 +243,62 @@ public class ClientCertAuthenticationTest {
                     .setSSLContext(clientContext)
                     .setSSLHostnameVerifier((String h, SSLSession s) -> true)
                     .build();
-            HttpGet get = new HttpGet(new URI("https", null, "localhost", 7777, null, null, null));
-            HttpResponse result = httpClient.execute(get);
-
-            assertEquals(StatusCodes.OK, result.getStatusLine().getStatusCode());
-
-            Header[] values = result.getHeaders("ProcessedBy");
-            assertEquals(1, values.length);
-            assertEquals("ResponseHandler", values[0].getValue());
-
-            values = result.getHeaders("UndertowUser");
-            assertEquals(1, values.length);
-            assertEquals("ladybird", values[0].getValue());
-
-            values = result.getHeaders("ElytronUser");
-            assertEquals(1, values.length);
-            assertEquals("ladybird", values[0].getValue());
-
-            readResponse(result);
+            assertSuccessFulResponse(httpClient.execute(new HttpGet(new URI("https", null, "localhost", 7777, null, null, null))));
+            assertSuccessFulResponse(httpClient.execute(new HttpGet(new URI("https", null, "localhost", 7777, null, null, null))));
         } finally {
             server.close();
         }
     }
 
-    public static String readResponse(final HttpResponse response) throws IOException {
+    private void assertSuccessFulResponse(HttpResponse result) throws IOException {
+        assertEquals(StatusCodes.OK, result.getStatusLine().getStatusCode());
+
+        Header[] values = result.getHeaders("ProcessedBy");
+        assertEquals(1, values.length);
+        assertEquals("ResponseHandler", values[0].getValue());
+
+        values = result.getHeaders("UndertowUser");
+        assertEquals(1, values.length);
+        assertEquals("ladybird", values[0].getValue());
+
+        values = result.getHeaders("ElytronUser");
+        assertEquals(1, values.length);
+        assertEquals("ladybird", values[0].getValue());
+
+        readResponse(result);
+    }
+
+    private HttpAuthenticationFactory createHttpAuthenticationFactory() throws Exception {
+        return createHttpAuthenticationFactory(createDefaultSecurityRealm());
+    }
+
+    private KeyStoreBackedSecurityRealm createDefaultSecurityRealm() throws Exception {
+        return new KeyStoreBackedSecurityRealm(loadKeyStore("/tls/beetles.keystore"));
+    }
+
+    private HttpAuthenticationFactory createHttpAuthenticationFactory(SecurityRealm securityRealm) throws Exception {
+        SecurityDomain securityDomain = SecurityDomain.builder()
+                .addRealm("KeystoreRealm", securityRealm)
+                .build()
+                .setDefaultRealmName("KeystoreRealm")
+                .setPrincipalDecoder(PrincipalDecoder.aggregate(new X500AttributePrincipalDecoder("2.5.4.3", 1), PrincipalDecoder.DEFAULT))
+                .setPreRealmRewriter(s -> s.toLowerCase())
+                .setPermissionMapper((principal, roles) -> PermissionVerifier.from(new LoginPermission()))
+                .build();
+
+        HttpServerAuthenticationMechanismFactory factory = new ServerMechanismFactoryImpl();
+        HttpAuthenticationFactory httpAuthenticationFactory = HttpAuthenticationFactory.builder()
+                .setSecurityDomain(securityDomain)
+                .setMechanismConfigurationSelector(MechanismConfigurationSelector.constantSelector(
+                        MechanismConfiguration.builder()
+                                .build()))
+                .setFactory(factory)
+                .build();
+
+        return httpAuthenticationFactory;
+    }
+
+    private static String readResponse(final HttpResponse response) throws IOException {
         HttpEntity entity = response.getEntity();
         if (entity == null) {
             return "";
@@ -268,7 +306,7 @@ public class ClientCertAuthenticationTest {
         return readResponse(entity.getContent());
     }
 
-    public static String readResponse(InputStream stream) throws IOException {
+    private static String readResponse(InputStream stream) throws IOException {
 
         byte[] data = new byte[100];
         int read;
@@ -279,7 +317,7 @@ public class ClientCertAuthenticationTest {
         return new String(out.toByteArray(), Charset.forName("UTF-8"));
     }
 
-    private static HttpServerAuthenticationMechanism createMechanism(final String mechanismName) {
+    private static HttpServerAuthenticationMechanism createMechanism(String mechanismName, HttpAuthenticationFactory httpAuthenticationFactory) {
         try {
             return httpAuthenticationFactory.createMechanism(mechanismName);
         } catch (HttpAuthenticationException e) {
@@ -288,11 +326,10 @@ public class ClientCertAuthenticationTest {
         }
     }
 
-    private static List<HttpServerAuthenticationMechanism> getAuthenticationMechanisms() {
+    private static List<HttpServerAuthenticationMechanism> getAuthenticationMechanisms(HttpAuthenticationFactory httpAuthenticationFactory) {
         return httpAuthenticationFactory.getMechanismNames().stream()
-            .map(ClientCertAuthenticationTest::createMechanism)
+            .map(mechanismName -> createMechanism(mechanismName, httpAuthenticationFactory))
             .filter(m -> m != null)
             .collect(Collectors.toList());
     }
-
 }
